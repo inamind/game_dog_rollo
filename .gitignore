@@ -1,0 +1,12 @@
+.agents/
+node_modules/
+tmp/
+
+# 런타임에서 사용하지 않는 제작 원본
+image_sources/house_garden_background.png
+*.m4a
+
+# 운영체제 및 편집기 임시 파일
+.DS_Store
+Thumbs.db
+*.log

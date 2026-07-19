@@ -1,0 +1,10 @@
+{
+  "name": "rollo-game",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-bundle.mjs",
+    "dev": "node scripts/build-bundle.mjs && node dev-server.mjs",
+    "check": "node scripts/build-bundle.mjs && node scripts/check-project.mjs"
+  }
+}
