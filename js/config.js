@@ -36,12 +36,18 @@ export const COMBAT = Object.freeze({
   objectHpByLevel: [60, 100, 150, 220, 300],
 });
 
+export const GAME_FLOW = Object.freeze({
+  victoryFrameSeconds: 0.24,
+  victoryRepeatCount: 3,
+});
+
 export const SPRITE_PATHS = Object.freeze({
   running: [1, 2, 3].map((frame) => `./image_sources/dog_running_${frame}.png`),
   jumping: [1, 2, 3].map((frame) => `./image_sources/dog_jumping_${frame}.png`),
   smashing: [1, 2, 3].map((frame) => `./image_sources/dog_smashing_${frame}.png`),
   biting: [1, 2, 3].map((frame) => `./image_sources/dog_biting_${frame}.png`),
   levelup: [1, 2, 3].map((frame) => `./image_sources/dog_levelup_${frame}.png`),
+  victory: [1, 2, 3].map((frame) => `./image_sources/dog_victory_${frame}.png`),
   explosion: [1, 2].map((frame) => `./image_sources/explosion_${frame}.png`),
 });
 

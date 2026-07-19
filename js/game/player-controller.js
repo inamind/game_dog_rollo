@@ -1,4 +1,4 @@
-import { PLAYER_RENDER, SPRITE_PATHS } from '../config.js';
+import { GAME_FLOW, PLAYER_RENDER, SPRITE_PATHS } from '../config.js';
 
 const ACTIONS = {
   idle: { frames: [SPRITE_PATHS.running[0]], frameSeconds: 0.1, loop: false },
@@ -7,6 +7,7 @@ const ACTIONS = {
   smashing: { frames: SPRITE_PATHS.smashing, frameSeconds: 0.12, loop: false },
   biting: { frames: SPRITE_PATHS.biting, frameSeconds: 0.15, loop: false },
   levelup: { frames: SPRITE_PATHS.levelup, frameSeconds: 0.5, loop: false },
+  victory: { frames: SPRITE_PATHS.victory, frameSeconds: GAME_FLOW.victoryFrameSeconds, loop: true },
 };
 
 export class PlayerController {
@@ -84,7 +85,7 @@ export class PlayerController {
   }
 
   isAnimationLocked() {
-    return this.isAttacking() || this.action === 'levelup';
+    return this.isAttacking() || this.action === 'levelup' || this.action === 'victory';
   }
 
   consumeAttackHit() {
@@ -99,6 +100,12 @@ export class PlayerController {
     this.route = [];
     this.routeMode = null;
     this.#setAction('levelup');
+  }
+
+  setVictory() {
+    this.route = [];
+    this.routeMode = null;
+    this.#setAction('victory');
   }
 
   update(delta) {

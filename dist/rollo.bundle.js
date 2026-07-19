@@ -189,12 +189,18 @@ const COMBAT = Object.freeze({
   objectHpByLevel: [60, 100, 150, 220, 300],
 });
 
+const GAME_FLOW = Object.freeze({
+  victoryFrameSeconds: 0.24,
+  victoryRepeatCount: 3,
+});
+
 const SPRITE_PATHS = Object.freeze({
   running: [1, 2, 3].map((frame) => `./image_sources/dog_running_${frame}.png`),
   jumping: [1, 2, 3].map((frame) => `./image_sources/dog_jumping_${frame}.png`),
   smashing: [1, 2, 3].map((frame) => `./image_sources/dog_smashing_${frame}.png`),
   biting: [1, 2, 3].map((frame) => `./image_sources/dog_biting_${frame}.png`),
   levelup: [1, 2, 3].map((frame) => `./image_sources/dog_levelup_${frame}.png`),
+  victory: [1, 2, 3].map((frame) => `./image_sources/dog_victory_${frame}.png`),
   explosion: [1, 2].map((frame) => `./image_sources/explosion_${frame}.png`),
 });
 
@@ -284,7 +290,95 @@ function tilePath(row, column) {
   return `./image_sources/house_garden_tile_r${row}_c${column}.png`;
 }
 
-Object.assign(exports, { PERFORMANCE, WORLD, PLAYER_RENDER, LEVEL_COLORS, COMBAT, SPRITE_PATHS, AUDIO_PATHS, OBJECT_SPRITE_PATHS, OBJECT_SPRITE_BOTTOM_INSETS, tilePath });
+Object.assign(exports, { PERFORMANCE, WORLD, PLAYER_RENDER, LEVEL_COLORS, COMBAT, GAME_FLOW, SPRITE_PATHS, AUDIO_PATHS, OBJECT_SPRITE_PATHS, OBJECT_SPRITE_BOTTOM_INSETS, tilePath });
+},
+"js/core/ranking-store.js": (__require, exports) => {
+const STORAGE_KEY = 'rollo.rankings.v1';
+
+class RankingStore {
+  load() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? { yard: [], house: [] };
+    } catch {
+      return { yard: [], house: [] };
+    }
+  }
+
+  save(record) {
+    const rankings = this.load();
+    const list = rankings[record.locationId] ?? [];
+    list.push(record);
+    list.sort((a, b) => b.score - a.score
+      || Number(b.cleared) - Number(a.cleared)
+      || b.remainingSeconds - a.remainingSeconds
+      || a.savedAt - b.savedAt);
+    rankings[record.locationId] = list.slice(0, 10);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(rankings)); } catch { /* 저장 불가 환경 */ }
+    return rankings[record.locationId];
+  }
+}
+
+Object.assign(exports, { RankingStore });
+},
+"js/core/asset-loader.js": (__require, exports) => {
+class AssetLoader {
+  #cache = new Map();
+  #concurrency;
+
+  constructor({ concurrency = 3 } = {}) {
+    this.#concurrency = Math.max(1, Math.floor(concurrency));
+  }
+
+  get(path) {
+    return this.#cache.get(path);
+  }
+
+  has(path) {
+    return this.#cache.has(path);
+  }
+
+  async load(paths, onProgress = () => {}) {
+    const uniquePaths = [...new Set(paths)];
+    const pending = uniquePaths.filter((path) => !this.#cache.has(path));
+    let completed = uniquePaths.length - pending.length;
+    onProgress(completed, uniquePaths.length);
+
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < pending.length) {
+        const path = pending[cursor];
+        cursor += 1;
+        const image = await this.#decodeImage(path);
+        this.#cache.set(path, image);
+        completed += 1;
+        onProgress(completed, uniquePaths.length);
+      }
+    };
+
+    const workerCount = Math.min(this.#concurrency, pending.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return uniquePaths.map((path) => this.#cache.get(path));
+  }
+
+  async #decodeImage(path) {
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = path;
+
+    if (typeof image.decode === 'function') {
+      await image.decode();
+      return image;
+    }
+
+    await new Promise((resolve, reject) => {
+      image.addEventListener('load', resolve, { once: true });
+      image.addEventListener('error', () => reject(new Error(`이미지를 불러오지 못했습니다: ${path}`)), { once: true });
+    });
+    return image;
+  }
+}
+
+Object.assign(exports, { AssetLoader });
 },
 "js/data/locations.js": (__require, exports) => {
 const { tilePath } = __require("js/config.js");
@@ -293,7 +387,7 @@ const LOCATIONS = Object.freeze({
   yard: {
     id: 'yard',
     label: '마당',
-    durationSeconds: 480,
+    durationSeconds: 240,
     cameraBounds: { x: 0, y: 0, width: 3840, height: 2160 },
     spawn: { x: 100, y: 2050 },
     tilePaths: [tilePath(1, 1), tilePath(1, 2), tilePath(2, 1), tilePath(2, 2)],
@@ -302,7 +396,7 @@ const LOCATIONS = Object.freeze({
   house: {
     id: 'house',
     label: '집',
-    durationSeconds: 600,
+    durationSeconds: 300,
     cameraBounds: { x: 1920, y: 0, width: 3840, height: 2160 },
     spawn: { x: 4300, y: 1780 },
     tilePaths: [tilePath(1, 2), tilePath(1, 3), tilePath(2, 2), tilePath(2, 3)],
@@ -318,295 +412,6 @@ function getLocation(id) {
 
 Object.assign(exports, { LOCATIONS, getLocation });
 },
-"js/game/play-session.js": (__require, exports) => {
-const { AUDIO_PATHS, COMBAT, PERFORMANCE, SPRITE_PATHS } = __require("js/config.js");
-const { BgmPlayer } = __require("js/audio/bgm-player.js");
-const { SfxPlayer } = __require("js/audio/sfx-player.js");
-const { GameLoop } = __require("js/core/game-loop.js");
-const { PerformanceMonitor } = __require("js/core/performance-monitor.js");
-const { getObjectDefinitions } = __require("js/data/objects.js");
-const { Camera } = __require("js/game/camera.js");
-const { InputHandler } = __require("js/game/input-handler.js");
-const { Navigation } = __require("js/game/navigation.js");
-const { ObjectManager } = __require("js/game/object-manager.js");
-const { PlayerController } = __require("js/game/player-controller.js");
-const { Renderer } = __require("js/game/renderer.js");
-
-class PlaySession {
-  constructor({ canvas, playerName, location, assets, onEnd }) {
-    this.location = location;
-    this.assets = assets;
-    this.onEnd = onEnd;
-    this.renderer = new Renderer(canvas);
-    this.sfx = new SfxPlayer({
-      onCue: (cue) => { this.renderer.canvas.dataset.lastSound = cue; },
-    });
-    this.bgm = new BgmPlayer(AUDIO_PATHS.gameBgm);
-    this.camera = new Camera(location.cameraBounds);
-    this.player = new PlayerController({
-      name: playerName,
-      spawn: location.spawn,
-      navigation: new Navigation(location.id),
-    });
-    this.objects = new ObjectManager(getObjectDefinitions(location.id));
-    this.remainingSeconds = location.durationSeconds;
-    this.biteCooldown = 0;
-    this.specialExplosions = [];
-    this.pendingSpecialClear = false;
-    this.destroyedExp = 0;
-    this.finished = false;
-    this.toastTimeout = 0;
-    this.metricsElapsed = 0;
-    this.monitor = new PerformanceMonitor({ longFrameMs: PERFORMANCE.longFrameMs });
-    this.loop = new GameLoop({
-      targetFps: PERFORMANCE.targetFps,
-      update: (delta) => this.update(delta),
-      render: () => this.render(),
-      onFrame: (sample) => this.monitor.record(sample),
-    });
-    this.handleResize = () => this.resize();
-    this.handleVisibility = () => this.onVisibilityChange();
-    this.handleAudioUnlock = () => {
-      this.sfx.unlock();
-      this.bgm.play();
-    };
-    this.input = new InputHandler({
-      canvas,
-      toWorld: (x, y) => this.renderer.screenToWorld(x, y, this.camera),
-      onHorizontal: (direction) => this.player.moveHorizontal(direction),
-      onFloor: (direction) => this.player.moveFloor(direction),
-      onObjectTouch: (x, y) => {
-        if (this.objects.canTouchSmash(this.player, x, y)) this.smash();
-      },
-      onSmash: () => this.smash(),
-      onBite: () => this.bite(),
-    });
-    this.handleSmashButton = () => this.smash();
-    this.handleBiteButton = () => this.bite();
-    this.handleExitRequest = () => document.querySelector('#exit-dialog').showModal();
-    this.handleConfirmExit = () => this.finish(false, 'exit');
-  }
-
-  start() {
-    window.addEventListener('resize', this.handleResize);
-    document.addEventListener('visibilitychange', this.handleVisibility);
-    document.addEventListener('pointerdown', this.handleAudioUnlock, { passive: true });
-    document.addEventListener('keydown', this.handleAudioUnlock);
-    document.querySelector('#smash-button').addEventListener('click', this.handleSmashButton);
-    document.querySelector('#bite-button').addEventListener('click', this.handleBiteButton);
-    document.querySelector('#exit-button').addEventListener('click', this.handleExitRequest);
-    document.querySelector('#back-button').addEventListener('click', this.handleExitRequest);
-    document.querySelector('#confirm-exit-button').addEventListener('click', this.handleConfirmExit);
-    this.resize();
-    this.monitor.reset();
-    this.bgm.play();
-    this.loop.start();
-    window.rolloPerformance = () => this.monitor.snapshot();
-  }
-
-  stop() {
-    this.loop.stop();
-    window.removeEventListener('resize', this.handleResize);
-    document.removeEventListener('visibilitychange', this.handleVisibility);
-    document.removeEventListener('pointerdown', this.handleAudioUnlock);
-    document.removeEventListener('keydown', this.handleAudioUnlock);
-    document.querySelector('#smash-button').removeEventListener('click', this.handleSmashButton);
-    document.querySelector('#bite-button').removeEventListener('click', this.handleBiteButton);
-    document.querySelector('#exit-button').removeEventListener('click', this.handleExitRequest);
-    document.querySelector('#back-button').removeEventListener('click', this.handleExitRequest);
-    document.querySelector('#confirm-exit-button').removeEventListener('click', this.handleConfirmExit);
-    this.input.destroy();
-    this.sfx.dispose();
-    this.bgm.dispose();
-  }
-
-  resize() {
-    this.renderer.resize();
-    this.camera.setViewport(this.renderer.viewportWidth, this.renderer.viewportHeight);
-  }
-
-  onVisibilityChange() {
-    if (document.hidden) {
-      this.loop.stop();
-      this.sfx.suspend();
-      this.bgm.pause();
-    }
-    else {
-      this.sfx.resume();
-      this.bgm.resume();
-      this.loop.resetClock();
-      this.monitor.reset();
-      this.loop.start();
-    }
-  }
-
-  update(delta) {
-    this.player.update(delta);
-    this.remainingSeconds = Math.max(0, this.remainingSeconds - delta);
-    this.biteCooldown = Math.max(0, this.biteCooldown - delta);
-    this.updateSpecialExplosions(delta);
-
-    const attackType = this.player.consumeAttackHit();
-    if (attackType) this.resolveAttack(attackType);
-
-    if (this.pendingSpecialClear && this.specialExplosions.length === 0) {
-      this.finish(true, 'clear');
-      return;
-    }
-    if (this.remainingSeconds <= 0 && !this.finished && !this.pendingSpecialClear) {
-      this.finish(false, 'timeout');
-      return;
-    }
-    this.camera.follow(this.player);
-    this.updateHud();
-    this.metricsElapsed += delta;
-    if (this.metricsElapsed >= 1) {
-      this.metricsElapsed = 0;
-      const metrics = this.monitor.snapshot();
-      this.renderer.canvas.dataset.fps = String(metrics.fps);
-      this.renderer.canvas.dataset.longFrames = String(metrics.longFrames);
-      this.renderer.canvas.dataset.maxFrameMs = String(metrics.maxFrameMs);
-      this.renderer.canvas.dataset.maxRenderMs = String(metrics.maxRenderMs);
-      this.renderer.canvas.dataset.playerX = String(Math.round(this.player.x));
-      this.renderer.canvas.dataset.playerY = String(Math.round(this.player.y));
-      this.renderer.canvas.dataset.playerFloor = String(this.player.floor);
-      this.renderer.canvas.dataset.playerAction = this.player.action;
-    }
-  }
-
-  render() {
-    this.renderer.beginFrame(this.camera);
-    this.renderer.drawBackground(this.camera, this.location, this.assets);
-    this.renderer.drawObjects(this.objects, this.assets, this.camera);
-    const image = this.assets.get(this.player.spritePath ?? SPRITE_PATHS.running[0]);
-    if (image) this.renderer.drawPlayer(this.player, image);
-    for (const effect of this.specialExplosions) {
-      const explosion = this.assets.get(SPRITE_PATHS.explosion[effect.frameIndex]);
-      if (explosion) this.renderer.drawExplosion(effect, explosion, this.camera);
-    }
-  }
-
-  smash() {
-    if (this.player.attack('smashing')) this.sfx.playAttack('smashing');
-  }
-
-  bite() {
-    if (this.biteCooldown > 0) {
-      this.showToast(`필살기 준비 중 · ${Math.ceil(this.biteCooldown)}초`);
-      return;
-    }
-    if (this.player.attack('biting')) {
-      this.biteCooldown = COMBAT.biteCooldownSeconds;
-      this.sfx.playAttack('biting');
-    }
-  }
-
-  resolveAttack(attackType) {
-    this.renderer.canvas.dataset.lastAttack = attackType;
-    this.renderer.canvas.dataset.attackCount = String(
-      Number(this.renderer.canvas.dataset.attackCount || 0) + 1,
-    );
-    const result = this.objects.attack(this.player, attackType);
-    if (attackType === 'biting' && result.destroyed.length > 0) {
-      this.specialExplosions = result.destroyed.map((item) => ({
-        x: item.x,
-        y: item.y - item.height * 0.52,
-        size: Math.max(item.width, item.height) * 2.1,
-        elapsed: 0,
-        frameIndex: 0,
-      }));
-    }
-    if (result.blocked.length > 0) {
-      this.sfx.playBlocked();
-      const required = Math.min(...result.blocked.map((item) => item.requiredLevel));
-      this.showToast(`아직 레벨이 부족해요! Lv.${required} 필요`);
-    }
-    if (result.destroyed.length > 0) this.sfx.playDestroy();
-    else if (result.hit > 0) {
-      const reachedHeavyDamage = result.damaged.some((item) => item.state >= 3);
-      this.sfx.playHit(attackType === 'biting' || reachedHeavyDamage);
-    }
-    if (result.destroyed.length === 0) return;
-
-    for (const item of result.destroyed) this.destroyedExp += item.exp;
-    let nextLevel = 1;
-    this.location.expThresholds.forEach((threshold, index) => {
-      if (this.destroyedExp >= threshold) nextLevel = index + 1;
-    });
-    if (nextLevel > this.player.level) {
-      this.player.setLevel(nextLevel);
-      this.sfx.playLevelUp();
-      this.showToast(`레벨 업! Lv.${nextLevel}`);
-    }
-    if (this.objects.allDestroyed) {
-      if (attackType === 'biting' && this.specialExplosions.length > 0) this.pendingSpecialClear = true;
-      else this.finish(true, 'clear');
-    }
-  }
-
-  updateSpecialExplosions(delta) {
-    const frameSeconds = COMBAT.specialExplosionFrameSeconds;
-    const duration = frameSeconds * SPRITE_PATHS.explosion.length;
-    for (const effect of this.specialExplosions) {
-      effect.elapsed += delta;
-      effect.frameIndex = Math.min(
-        SPRITE_PATHS.explosion.length - 1,
-        Math.floor(effect.elapsed / frameSeconds),
-      );
-    }
-    this.specialExplosions = this.specialExplosions.filter((effect) => effect.elapsed < duration);
-  }
-
-  updateHud() {
-    const minutes = Math.floor(this.remainingSeconds / 60);
-    const seconds = Math.floor(this.remainingSeconds % 60);
-    document.querySelector('#timer-display').textContent = `남은 시간 ${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-    document.querySelector('#level-display').textContent = `Lv.${this.player.level}`;
-    const nextThreshold = this.location.expThresholds[this.player.level] ?? 'MAX';
-    document.querySelector('#exp-display').textContent = `EXP ${this.destroyedExp} / ${nextThreshold}`;
-    document.querySelector('#destroyed-display').textContent = `부순 개수 ${this.objects.destroyedCount}`;
-    const biteButton = document.querySelector('#bite-button');
-    biteButton.disabled = this.biteCooldown > 0;
-    document.querySelector('#bite-button-text').textContent = this.biteCooldown > 0
-      ? `🔥 ${Math.ceil(this.biteCooldown)}초`
-      : '🔥 필살기';
-  }
-
-  showToast(message) {
-    const toast = document.querySelector('#toast');
-    toast.textContent = message;
-    toast.classList.add('is-visible');
-    clearTimeout(this.toastTimeout);
-    this.toastTimeout = setTimeout(() => toast.classList.remove('is-visible'), 1300);
-  }
-
-  finish(cleared, reason) {
-    if (this.finished) return;
-    this.finished = true;
-    const remainingSeconds = Math.floor(this.remainingSeconds);
-    const bonusExp = cleared ? remainingSeconds : 0;
-    const record = {
-      playerName: this.player.name,
-      locationId: this.location.id,
-      locationLabel: this.location.label,
-      destroyedCount: this.objects.destroyedCount,
-      totalObjects: this.objects.objects.length,
-      level: this.player.level,
-      destroyedExp: this.destroyedExp,
-      remainingSeconds,
-      bonusExp,
-      score: this.destroyedExp + bonusExp,
-      cleared,
-      reason,
-      savedAt: Date.now(),
-    };
-    this.stop();
-    this.onEnd(record);
-  }
-}
-
-Object.assign(exports, { PlaySession });
-},
 "js/data/objects.js": (__require, exports) => {
 const object = (id, name, level, x, y, width = 150, height = 150, floorY = y) => ({
   id, name, requiredLevel: level, exp: level * 3, x, y, width, height, floorY,
@@ -614,43 +419,43 @@ const object = (id, name, level, x, y, width = 150, height = 150, floorY = y) =>
 
 const OBJECTS = Object.freeze({
   yard: [
-    object('pot-a', '화분 A', 1, 220, 2050, 100, 120),
-    object('pot-b', '화분 B', 1, 430, 2050, 100, 120),
-    object('pot-c', '화분 C', 1, 640, 2050, 100, 120),
-    object('sandcastle', '모래성', 1, 880, 2050, 150, 110),
-    object('fence', '울타리', 2, 1120, 2050, 180, 150),
-    object('shelf', '선반', 2, 1370, 2050, 150, 180),
-    object('bench', '벤치', 3, 1610, 2050, 190, 130),
-    object('swing', '그네', 3, 1860, 2050, 190, 210),
-    object('bike', '자전거', 3, 2110, 2050, 170, 130),
-    object('seesaw', '시소', 3, 2350, 2050, 210, 110),
-    object('toolbox', '공구함', 4, 2580, 2050, 150, 100),
-    object('slide', '미끄럼틀', 4, 2800, 2050, 200, 190),
-    object('fountain', '분수', 5, 3050, 2050, 180, 220),
-    object('trampoline', '트램펄린', 5, 3290, 2050, 210, 90),
-    object('tree', '나무', 5, 3540, 2050, 220, 300),
+    object('pot-a', 'Flowerpot A', 1, 220, 2050, 100, 120),
+    object('pot-b', 'Flowerpot B', 1, 430, 2050, 100, 120),
+    object('pot-c', 'Flowerpot C', 1, 640, 2050, 100, 120),
+    object('sandcastle', 'Sandcastle', 1, 880, 2050, 150, 110),
+    object('fence', 'Fence', 2, 1120, 2050, 180, 150),
+    object('shelf', 'Shelf', 2, 1370, 2050, 150, 180),
+    object('bench', 'Bench', 3, 1610, 2050, 190, 130),
+    object('swing', 'Swing', 3, 1860, 2050, 190, 210),
+    object('bike', 'Bicycle', 3, 2110, 2050, 170, 130),
+    object('seesaw', 'Seesaw', 3, 2350, 2050, 210, 110),
+    object('toolbox', 'Toolbox', 4, 2580, 2050, 150, 100),
+    object('slide', 'Slide', 4, 2800, 2050, 200, 190),
+    object('fountain', 'Fountain', 5, 3050, 2050, 180, 220),
+    object('trampoline', 'Trampoline', 5, 3290, 2050, 210, 90),
+    object('tree', 'Tree', 5, 3540, 2050, 220, 300),
   ],
   house: [
-    object('sofa', '소파', 1, 3300, 1780, 190, 130),
-    object('vase', '꽃병', 1, 3550, 1780, 90, 120),
-    object('table', '테이블', 2, 3820, 1780, 170, 120),
-    object('frame', '액자', 2, 4090, 1650, 110, 130, 1780),
+    object('sofa', 'Sofa', 1, 3300, 1780, 190, 130),
+    object('vase', 'Vase', 1, 3550, 1780, 90, 120),
+    object('table', 'Table', 2, 3820, 1780, 170, 120),
+    object('frame', 'Picture Frame', 2, 4090, 1650, 110, 130, 1780),
     object('tv', 'TV', 3, 4380, 1780, 170, 130),
-    object('plate', '접시', 1, 4640, 1780, 100, 90),
-    object('chair', '의자', 2, 4880, 1780, 130, 150),
-    object('microwave', '전자레인지', 3, 5150, 1780, 150, 110),
-    object('fridge', '냉장고', 5, 5470, 1780, 170, 260),
-    object('lamp', '램프', 1, 3300, 1235, 100, 150),
-    object('mirror', '거울', 2, 3560, 1100, 110, 150, 1235),
-    object('desk', '책상', 3, 3830, 1235, 180, 140),
-    object('bed', '침대', 4, 4140, 1235, 220, 110),
-    object('wardrobe', '옷장', 5, 4470, 1235, 180, 250),
-    object('tile', '타일', 2, 4770, 1120, 110, 110, 1235),
-    object('sink', '세면대', 3, 5040, 1235, 160, 150),
-    object('toilet', '변기', 4, 5360, 1235, 150, 150),
-    object('box', '상자', 1, 3500, 720, 140, 120),
-    object('old-furniture', '오래된 가구', 5, 4230, 720, 200, 180),
-    object('piano', '피아노', 5, 5200, 720, 250, 180),
+    object('plate', 'Plate', 1, 4640, 1780, 100, 90),
+    object('chair', 'Chair', 2, 4880, 1780, 130, 150),
+    object('microwave', 'Microwave', 3, 5150, 1780, 150, 110),
+    object('fridge', 'Fridge', 5, 5470, 1780, 170, 260),
+    object('lamp', 'Lamp', 1, 3300, 1235, 100, 150),
+    object('mirror', 'Mirror', 2, 3560, 1100, 110, 150, 1235),
+    object('desk', 'Desk', 3, 3830, 1235, 180, 140),
+    object('bed', 'Bed', 4, 4140, 1235, 220, 110),
+    object('wardrobe', 'Wardrobe', 5, 4470, 1235, 180, 250),
+    object('tile', 'Wall Tile', 2, 4770, 1120, 110, 110, 1235),
+    object('sink', 'Sink', 3, 5040, 1235, 160, 150),
+    object('toilet', 'Toilet', 4, 5360, 1235, 150, 150),
+    object('box', 'Box', 1, 3500, 720, 140, 120),
+    object('old-furniture', 'Old Furniture', 5, 4230, 720, 200, 180),
+    object('piano', 'Piano', 5, 5200, 720, 250, 180),
   ],
 });
 
@@ -737,33 +542,485 @@ function getObjectDefinitions(locationId, random = Math.random) {
 
 Object.assign(exports, { OBJECTS, SAFE_PLACEMENT_SEGMENTS, getObjectDefinitions });
 },
-"js/core/ranking-store.js": (__require, exports) => {
-const STORAGE_KEY = 'rollo.rankings.v1';
+"js/game/play-session.js": (__require, exports) => {
+const { AUDIO_PATHS, COMBAT, GAME_FLOW, PERFORMANCE, SPRITE_PATHS } = __require("js/config.js");
+const { BgmPlayer } = __require("js/audio/bgm-player.js");
+const { SfxPlayer } = __require("js/audio/sfx-player.js");
+const { GameLoop } = __require("js/core/game-loop.js");
+const { PerformanceMonitor } = __require("js/core/performance-monitor.js");
+const { getObjectDefinitions } = __require("js/data/objects.js");
+const { Camera } = __require("js/game/camera.js");
+const { InputHandler } = __require("js/game/input-handler.js");
+const { Navigation } = __require("js/game/navigation.js");
+const { ObjectManager } = __require("js/game/object-manager.js");
+const { PlayerController } = __require("js/game/player-controller.js");
+const { Renderer } = __require("js/game/renderer.js");
 
-class RankingStore {
-  load() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? { yard: [], house: [] };
-    } catch {
-      return { yard: [], house: [] };
+class PlaySession {
+  constructor({ canvas, playerName, location, assets, onEnd }) {
+    this.location = location;
+    this.assets = assets;
+    this.onEnd = onEnd;
+    this.renderer = new Renderer(canvas);
+    this.sfx = new SfxPlayer({
+      onCue: (cue) => { this.renderer.canvas.dataset.lastSound = cue; },
+    });
+    this.bgm = new BgmPlayer(AUDIO_PATHS.gameBgm);
+    this.camera = new Camera(location.cameraBounds);
+    this.player = new PlayerController({
+      name: playerName,
+      spawn: location.spawn,
+      navigation: new Navigation(location.id),
+    });
+    this.objects = new ObjectManager(getObjectDefinitions(location.id));
+    this.remainingSeconds = location.durationSeconds;
+    this.biteCooldown = 0;
+    this.specialExplosions = [];
+    this.victoryRemaining = null;
+    this.destroyedExp = 0;
+    this.finished = false;
+    this.toastTimeout = 0;
+    this.metricsElapsed = 0;
+    this.monitor = new PerformanceMonitor({ longFrameMs: PERFORMANCE.longFrameMs });
+    this.loop = new GameLoop({
+      targetFps: PERFORMANCE.targetFps,
+      update: (delta) => this.update(delta),
+      render: () => this.render(),
+      onFrame: (sample) => this.monitor.record(sample),
+    });
+    this.handleResize = () => this.resize();
+    this.handleVisibility = () => this.onVisibilityChange();
+    this.handleAudioUnlock = () => {
+      this.sfx.unlock();
+      this.bgm.play();
+    };
+    this.input = new InputHandler({
+      canvas,
+      toWorld: (x, y) => this.renderer.screenToWorld(x, y, this.camera),
+      onHorizontal: (direction) => {
+        if (this.victoryRemaining === null) this.player.moveHorizontal(direction);
+      },
+      onFloor: (direction) => {
+        if (this.victoryRemaining === null) this.player.moveFloor(direction);
+      },
+      onObjectTouch: (x, y) => {
+        if (this.victoryRemaining === null
+          && this.objects.canTouchSmash(this.player, x, y)) this.smash();
+      },
+      onSmash: () => this.smash(),
+      onBite: () => this.bite(),
+    });
+    this.handleSmashButton = () => this.smash();
+    this.handleBiteButton = () => this.bite();
+    this.handleExitRequest = () => document.querySelector('#exit-dialog').showModal();
+    this.handleConfirmExit = () => this.finish(false, 'exit');
+  }
+
+  start() {
+    window.addEventListener('resize', this.handleResize);
+    document.addEventListener('visibilitychange', this.handleVisibility);
+    document.addEventListener('pointerdown', this.handleAudioUnlock, { passive: true });
+    document.addEventListener('keydown', this.handleAudioUnlock);
+    document.querySelector('#smash-button').addEventListener('click', this.handleSmashButton);
+    document.querySelector('#bite-button').addEventListener('click', this.handleBiteButton);
+    document.querySelector('#exit-button').addEventListener('click', this.handleExitRequest);
+    document.querySelector('#back-button').addEventListener('click', this.handleExitRequest);
+    document.querySelector('#confirm-exit-button').addEventListener('click', this.handleConfirmExit);
+    this.resize();
+    this.monitor.reset();
+    this.bgm.play();
+    this.loop.start();
+    window.rolloPerformance = () => this.monitor.snapshot();
+  }
+
+  stop() {
+    this.loop.stop();
+    window.removeEventListener('resize', this.handleResize);
+    document.removeEventListener('visibilitychange', this.handleVisibility);
+    document.removeEventListener('pointerdown', this.handleAudioUnlock);
+    document.removeEventListener('keydown', this.handleAudioUnlock);
+    document.querySelector('#smash-button').removeEventListener('click', this.handleSmashButton);
+    document.querySelector('#bite-button').removeEventListener('click', this.handleBiteButton);
+    document.querySelector('#exit-button').removeEventListener('click', this.handleExitRequest);
+    document.querySelector('#back-button').removeEventListener('click', this.handleExitRequest);
+    document.querySelector('#confirm-exit-button').removeEventListener('click', this.handleConfirmExit);
+    this.input.destroy();
+    this.sfx.dispose();
+    this.bgm.dispose();
+  }
+
+  resize() {
+    this.renderer.resize();
+    this.camera.setViewport(this.renderer.viewportWidth, this.renderer.viewportHeight);
+  }
+
+  onVisibilityChange() {
+    if (document.hidden) {
+      this.loop.stop();
+      this.sfx.suspend();
+      this.bgm.pause();
+    }
+    else {
+      this.sfx.resume();
+      this.bgm.resume();
+      this.loop.resetClock();
+      this.monitor.reset();
+      this.loop.start();
     }
   }
 
-  save(record) {
-    const rankings = this.load();
-    const list = rankings[record.locationId] ?? [];
-    list.push(record);
-    list.sort((a, b) => b.score - a.score
-      || Number(b.cleared) - Number(a.cleared)
-      || b.remainingSeconds - a.remainingSeconds
-      || a.savedAt - b.savedAt);
-    rankings[record.locationId] = list.slice(0, 10);
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(rankings)); } catch { /* 저장 불가 환경 */ }
-    return rankings[record.locationId];
+  update(delta) {
+    this.player.update(delta);
+    if (this.victoryRemaining === null) {
+      this.remainingSeconds = Math.max(0, this.remainingSeconds - delta);
+      this.biteCooldown = Math.max(0, this.biteCooldown - delta);
+    } else {
+      this.victoryRemaining = Math.max(0, this.victoryRemaining - delta);
+    }
+    this.updateSpecialExplosions(delta);
+
+    const attackType = this.player.consumeAttackHit();
+    if (attackType) this.resolveAttack(attackType);
+
+    if (this.victoryRemaining === 0 && this.specialExplosions.length === 0) {
+      this.finish(true, 'clear');
+      return;
+    }
+    if (this.remainingSeconds <= 0 && !this.finished && this.victoryRemaining === null) {
+      this.finish(false, 'timeout');
+      return;
+    }
+    this.camera.follow(this.player);
+    this.updateHud();
+    this.metricsElapsed += delta;
+    if (this.metricsElapsed >= 1) {
+      this.metricsElapsed = 0;
+      const metrics = this.monitor.snapshot();
+      this.renderer.canvas.dataset.fps = String(metrics.fps);
+      this.renderer.canvas.dataset.longFrames = String(metrics.longFrames);
+      this.renderer.canvas.dataset.maxFrameMs = String(metrics.maxFrameMs);
+      this.renderer.canvas.dataset.maxRenderMs = String(metrics.maxRenderMs);
+      this.renderer.canvas.dataset.playerX = String(Math.round(this.player.x));
+      this.renderer.canvas.dataset.playerY = String(Math.round(this.player.y));
+      this.renderer.canvas.dataset.playerFloor = String(this.player.floor);
+      this.renderer.canvas.dataset.playerAction = this.player.action;
+    }
+  }
+
+  render() {
+    this.renderer.beginFrame(this.camera);
+    this.renderer.drawBackground(this.camera, this.location, this.assets);
+    this.renderer.drawObjects(this.objects, this.assets, this.camera);
+    const image = this.assets.get(this.player.spritePath ?? SPRITE_PATHS.running[0]);
+    if (image) this.renderer.drawPlayer(this.player, image);
+    for (const effect of this.specialExplosions) {
+      const explosion = this.assets.get(SPRITE_PATHS.explosion[effect.frameIndex]);
+      if (explosion) this.renderer.drawExplosion(effect, explosion, this.camera);
+    }
+  }
+
+  smash() {
+    if (this.victoryRemaining !== null || this.finished) return;
+    if (this.player.attack('smashing')) this.sfx.playAttack('smashing');
+  }
+
+  bite() {
+    if (this.victoryRemaining !== null || this.finished) return;
+    if (this.biteCooldown > 0) {
+      this.showToast(`필살기 준비 중 · ${Math.ceil(this.biteCooldown)}초`);
+      return;
+    }
+    if (this.player.attack('biting')) {
+      this.biteCooldown = COMBAT.biteCooldownSeconds;
+      this.sfx.playAttack('biting');
+    }
+  }
+
+  resolveAttack(attackType) {
+    this.renderer.canvas.dataset.lastAttack = attackType;
+    this.renderer.canvas.dataset.attackCount = String(
+      Number(this.renderer.canvas.dataset.attackCount || 0) + 1,
+    );
+    const result = this.objects.attack(this.player, attackType);
+    if (attackType === 'biting' && result.destroyed.length > 0) {
+      this.specialExplosions = result.destroyed.map((item) => ({
+        x: item.x,
+        y: item.y - item.height * 0.52,
+        size: Math.max(item.width, item.height) * 2.1,
+        elapsed: 0,
+        frameIndex: 0,
+      }));
+    }
+    if (result.blocked.length > 0) {
+      this.sfx.playBlocked();
+      const required = Math.min(...result.blocked.map((item) => item.requiredLevel));
+      this.showToast(`아직 레벨이 부족해요! Lv.${required} 필요`);
+    }
+    if (result.destroyed.length > 0) this.sfx.playDestroy();
+    else if (result.hit > 0) {
+      const reachedHeavyDamage = result.damaged.some((item) => item.state >= 3);
+      this.sfx.playHit(attackType === 'biting' || reachedHeavyDamage);
+    }
+    if (result.destroyed.length === 0) return;
+
+    for (const item of result.destroyed) this.destroyedExp += item.exp;
+    let nextLevel = 1;
+    this.location.expThresholds.forEach((threshold, index) => {
+      if (this.destroyedExp >= threshold) nextLevel = index + 1;
+    });
+    if (nextLevel > this.player.level) {
+      this.player.setLevel(nextLevel);
+      this.sfx.playLevelUp();
+      this.showToast(`레벨 업! Lv.${nextLevel}`);
+    }
+    if (this.objects.allDestroyed) {
+      const cycleSeconds = GAME_FLOW.victoryFrameSeconds * SPRITE_PATHS.victory.length;
+      this.victoryRemaining = cycleSeconds * GAME_FLOW.victoryRepeatCount;
+      this.player.setVictory();
+      this.renderer.canvas.dataset.victoryRepeatCount = String(GAME_FLOW.victoryRepeatCount);
+    }
+  }
+
+  updateSpecialExplosions(delta) {
+    const frameSeconds = COMBAT.specialExplosionFrameSeconds;
+    const duration = frameSeconds * SPRITE_PATHS.explosion.length;
+    for (const effect of this.specialExplosions) {
+      effect.elapsed += delta;
+      effect.frameIndex = Math.min(
+        SPRITE_PATHS.explosion.length - 1,
+        Math.floor(effect.elapsed / frameSeconds),
+      );
+    }
+    this.specialExplosions = this.specialExplosions.filter((effect) => effect.elapsed < duration);
+  }
+
+  updateHud() {
+    const minutes = Math.floor(this.remainingSeconds / 60);
+    const seconds = Math.floor(this.remainingSeconds % 60);
+    document.querySelector('#timer-display').textContent = `남은 시간 ${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    document.querySelector('#level-display').textContent = `Lv.${this.player.level}`;
+    const nextThreshold = this.location.expThresholds[this.player.level] ?? 'MAX';
+    document.querySelector('#exp-display').textContent = `EXP ${this.destroyedExp} / ${nextThreshold}`;
+    document.querySelector('#destroyed-display').textContent = `부순 개수 ${this.objects.destroyedCount}`;
+    const biteButton = document.querySelector('#bite-button');
+    biteButton.disabled = this.biteCooldown > 0;
+    document.querySelector('#bite-button-text').textContent = this.biteCooldown > 0
+      ? `🔥 ${Math.ceil(this.biteCooldown)}초`
+      : '🔥 필살기';
+  }
+
+  showToast(message) {
+    const toast = document.querySelector('#toast');
+    toast.textContent = message;
+    toast.classList.add('is-visible');
+    clearTimeout(this.toastTimeout);
+    this.toastTimeout = setTimeout(() => toast.classList.remove('is-visible'), 1300);
+  }
+
+  finish(cleared, reason) {
+    if (this.finished) return;
+    this.finished = true;
+    const remainingSeconds = Math.floor(this.remainingSeconds);
+    const bonusExp = cleared ? remainingSeconds : 0;
+    const record = {
+      playerName: this.player.name,
+      locationId: this.location.id,
+      locationLabel: this.location.label,
+      destroyedCount: this.objects.destroyedCount,
+      totalObjects: this.objects.objects.length,
+      level: this.player.level,
+      destroyedExp: this.destroyedExp,
+      remainingSeconds,
+      bonusExp,
+      score: this.destroyedExp + bonusExp,
+      cleared,
+      reason,
+      savedAt: Date.now(),
+    };
+    this.stop();
+    this.onEnd(record);
   }
 }
 
-Object.assign(exports, { RankingStore });
+Object.assign(exports, { PlaySession });
+},
+"js/audio/bgm-player.js": (__require, exports) => {
+class BgmPlayer {
+  constructor(path, { volume = 0.24 } = {}) {
+    this.path = path;
+    this.volume = volume;
+    this.audio = null;
+    this.started = false;
+    this.disposed = false;
+  }
+
+  play() {
+    if (this.disposed || typeof Audio === 'undefined') return Promise.resolve(false);
+    if (!this.audio) {
+      this.audio = new Audio(this.path);
+      this.audio.loop = true;
+      this.audio.preload = 'auto';
+      this.audio.volume = this.volume;
+    }
+    this.started = true;
+    return this.audio.play().then(() => true).catch(() => false);
+  }
+
+  pause() {
+    this.audio?.pause();
+  }
+
+  resume() {
+    if (this.started) this.play();
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (!this.audio) return;
+    this.audio.pause();
+    this.audio.currentTime = 0;
+    this.audio.src = '';
+    this.audio.load();
+  }
+}
+
+Object.assign(exports, { BgmPlayer });
+},
+"js/audio/sfx-player.js": (__require, exports) => {
+const AudioContextClass = () => globalThis.AudioContext ?? globalThis.webkitAudioContext;
+
+class SfxPlayer {
+  constructor({ volume = 0.42, onCue = () => {} } = {}) {
+    this.volume = volume;
+    this.onCue = onCue;
+    this.context = null;
+    this.master = null;
+    this.noiseBuffer = null;
+    this.disposed = false;
+  }
+
+  unlock() {
+    const context = this.#ensureContext();
+    if (context?.state === 'suspended') context.resume().catch(() => {});
+  }
+
+  playAttack(type) {
+    if (type === 'biting') {
+      this.#cue('bite');
+      this.#noise(0.15, 0.18, 520);
+      this.#tone(145, 72, 0.18, 0.22, 'sawtooth');
+      return;
+    }
+    this.#cue('smash');
+    this.#noise(0.09, 0.11, 900);
+    this.#tone(240, 125, 0.1, 0.14, 'triangle');
+  }
+
+  playHit(strong = false) {
+    this.#cue(strong ? 'heavy-hit' : 'hit');
+    this.#noise(strong ? 0.18 : 0.11, strong ? 0.34 : 0.22, strong ? 1050 : 1450);
+    this.#tone(strong ? 105 : 155, strong ? 52 : 78, strong ? 0.2 : 0.13, strong ? 0.3 : 0.22, 'square');
+  }
+
+  playBlocked() {
+    this.#cue('blocked');
+    this.#tone(165, 128, 0.13, 0.12, 'square');
+  }
+
+  playDestroy() {
+    this.#cue('destroy');
+    this.#noise(0.3, 0.42, 700);
+    this.#tone(128, 45, 0.34, 0.32, 'sawtooth');
+    this.#tone(82, 38, 0.26, 0.22, 'square', 0.06);
+  }
+
+  playLevelUp() {
+    this.#cue('level-up');
+    [523.25, 659.25, 783.99, 1046.5].forEach((frequency, index) => {
+      this.#tone(frequency, frequency * 1.015, 0.34, 0.15, 'sine', index * 0.115);
+    });
+    [1318.5, 1568, 2093].forEach((frequency, index) => {
+      this.#tone(frequency, frequency * 0.99, 0.25, 0.055, 'sine', 0.38 + index * 0.075);
+    });
+  }
+
+  suspend() {
+    if (this.context?.state === 'running') this.context.suspend().catch(() => {});
+  }
+
+  resume() {
+    if (this.context?.state === 'suspended') this.context.resume().catch(() => {});
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    const context = this.context;
+    if (!context || context.state === 'closed') return;
+    // 파괴·레벨업의 잔향이 결과 화면에서도 끝까지 들리도록 잠시 뒤 닫는다.
+    globalThis.setTimeout(() => context.close().catch(() => {}), 1600);
+  }
+
+  #cue(name) {
+    this.onCue(name);
+    this.unlock();
+  }
+
+  #ensureContext() {
+    if (this.disposed) return null;
+    if (this.context) return this.context;
+    const Context = AudioContextClass();
+    if (!Context) return null;
+    this.context = new Context({ latencyHint: 'interactive' });
+    this.master = this.context.createGain();
+    this.master.gain.value = this.volume;
+    this.master.connect(this.context.destination);
+    return this.context;
+  }
+
+  #tone(startFrequency, endFrequency, duration, gain, type, delay = 0) {
+    const context = this.#ensureContext();
+    if (!context) return;
+    const start = context.currentTime + delay;
+    const oscillator = context.createOscillator();
+    const envelope = context.createGain();
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(startFrequency, start);
+    oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, endFrequency), start + duration);
+    envelope.gain.setValueAtTime(0.0001, start);
+    envelope.gain.exponentialRampToValueAtTime(gain, start + Math.min(0.018, duration * 0.2));
+    envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    oscillator.connect(envelope).connect(this.master);
+    oscillator.start(start);
+    oscillator.stop(start + duration + 0.02);
+  }
+
+  #noise(duration, gain, cutoff, delay = 0) {
+    const context = this.#ensureContext();
+    if (!context) return;
+    if (!this.noiseBuffer) {
+      const length = Math.ceil(context.sampleRate * 0.5);
+      this.noiseBuffer = context.createBuffer(1, length, context.sampleRate);
+      const data = this.noiseBuffer.getChannelData(0);
+      for (let index = 0; index < length; index += 1) data[index] = Math.random() * 2 - 1;
+    }
+    const start = context.currentTime + delay;
+    const source = context.createBufferSource();
+    const filter = context.createBiquadFilter();
+    const envelope = context.createGain();
+    source.buffer = this.noiseBuffer;
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(cutoff, start);
+    envelope.gain.setValueAtTime(gain, start);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    source.connect(filter).connect(envelope).connect(this.master);
+    source.start(start);
+    source.stop(start + duration + 0.02);
+  }
+}
+
+Object.assign(exports, { SfxPlayer });
 },
 "js/core/game-loop.js": (__require, exports) => {
 class GameLoop {
@@ -831,49 +1088,6 @@ class GameLoop {
 
 Object.assign(exports, { GameLoop });
 },
-"js/audio/bgm-player.js": (__require, exports) => {
-class BgmPlayer {
-  constructor(path, { volume = 0.24 } = {}) {
-    this.path = path;
-    this.volume = volume;
-    this.audio = null;
-    this.started = false;
-    this.disposed = false;
-  }
-
-  play() {
-    if (this.disposed || typeof Audio === 'undefined') return Promise.resolve(false);
-    if (!this.audio) {
-      this.audio = new Audio(this.path);
-      this.audio.loop = true;
-      this.audio.preload = 'auto';
-      this.audio.volume = this.volume;
-    }
-    this.started = true;
-    return this.audio.play().then(() => true).catch(() => false);
-  }
-
-  pause() {
-    this.audio?.pause();
-  }
-
-  resume() {
-    if (this.started) this.play();
-  }
-
-  dispose() {
-    if (this.disposed) return;
-    this.disposed = true;
-    if (!this.audio) return;
-    this.audio.pause();
-    this.audio.currentTime = 0;
-    this.audio.src = '';
-    this.audio.load();
-  }
-}
-
-Object.assign(exports, { BgmPlayer });
-},
 "js/game/camera.js": (__require, exports) => {
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -911,6 +1125,55 @@ class Camera {
 }
 
 Object.assign(exports, { Camera });
+},
+"js/core/performance-monitor.js": (__require, exports) => {
+class PerformanceMonitor {
+  #longFrameMs;
+  #sampleStarted = performance.now();
+  #frames = 0;
+  #longFrames = 0;
+  #maxFrameMs = 0;
+  #maxRenderMs = 0;
+  #fps = 0;
+
+  constructor({ longFrameMs = 50 } = {}) {
+    this.#longFrameMs = longFrameMs;
+  }
+
+  reset() {
+    this.#sampleStarted = performance.now();
+    this.#frames = 0;
+    this.#longFrames = 0;
+    this.#maxFrameMs = 0;
+    this.#maxRenderMs = 0;
+    this.#fps = 0;
+  }
+
+  record({ frameDelta, renderDuration }) {
+    this.#frames += 1;
+    this.#maxFrameMs = Math.max(this.#maxFrameMs, frameDelta);
+    this.#maxRenderMs = Math.max(this.#maxRenderMs, renderDuration);
+    if (frameDelta >= this.#longFrameMs) this.#longFrames += 1;
+
+    const elapsed = performance.now() - this.#sampleStarted;
+    if (elapsed >= 1000) {
+      this.#fps = Math.round((this.#frames * 1000) / elapsed);
+      this.#frames = 0;
+      this.#sampleStarted = performance.now();
+    }
+  }
+
+  snapshot() {
+    return {
+      fps: this.#fps,
+      longFrames: this.#longFrames,
+      maxFrameMs: Math.round(this.#maxFrameMs * 10) / 10,
+      maxRenderMs: Math.round(this.#maxRenderMs * 10) / 10,
+    };
+  }
+}
+
+Object.assign(exports, { PerformanceMonitor });
 },
 "js/game/input-handler.js": (__require, exports) => {
 class InputHandler {
@@ -1014,65 +1277,119 @@ class InputHandler {
 
 Object.assign(exports, { InputHandler });
 },
-"js/core/asset-loader.js": (__require, exports) => {
-class AssetLoader {
-  #cache = new Map();
-  #concurrency;
+"js/game/object-manager.js": (__require, exports) => {
+const { COMBAT, PLAYER_RENDER } = __require("js/config.js");
 
-  constructor({ concurrency = 3 } = {}) {
-    this.#concurrency = Math.max(1, Math.floor(concurrency));
+function intersects(a, b) {
+  return a.x < b.x + b.width && a.x + a.width > b.x
+    && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+function containsPoint(rect, x, y) {
+  return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+}
+
+function attackRange(player) {
+  const visualWidth = player.renderWidth ?? player.width;
+  const visualHeight = player.renderHeight ?? player.height;
+  const rangeWidth = Math.max(visualWidth * 0.45, COMBAT.minimumAttackReach);
+  const rangeHeight = visualHeight * 0.75;
+  const bodyFront = visualWidth * 0.5;
+  return {
+    x: player.facing > 0 ? player.x + bodyFront : player.x - bodyFront - rangeWidth,
+    y: player.y - rangeHeight,
+    width: rangeWidth,
+    height: rangeHeight,
+  };
+}
+
+class DestructibleObject {
+  constructor(definition) {
+    Object.assign(this, definition);
+    const requiredScale = PLAYER_RENDER.scaleByLevel[this.requiredLevel - 1]
+      ?? PLAYER_RENDER.scaleByLevel[PLAYER_RENDER.scaleByLevel.length - 1];
+    const requiredDogHeight = PLAYER_RENDER.baseSize * requiredScale;
+    const maximumMountHeight = requiredDogHeight * COMBAT.maximumMountHeightRatio;
+    this.floorY = definition.floorY ?? definition.y;
+    this.y = Math.max(definition.y, this.floorY - maximumMountHeight);
+    this.maxHp = COMBAT.objectHpByLevel[this.requiredLevel - 1];
+    this.hp = this.maxHp;
+    this.destroyed = false;
   }
 
-  get(path) {
-    return this.#cache.get(path);
+  get hitbox() {
+    return { x: this.x - this.width / 2, y: this.y - this.height, width: this.width, height: this.height };
   }
 
-  has(path) {
-    return this.#cache.has(path);
-  }
-
-  async load(paths, onProgress = () => {}) {
-    const uniquePaths = [...new Set(paths)];
-    const pending = uniquePaths.filter((path) => !this.#cache.has(path));
-    let completed = uniquePaths.length - pending.length;
-    onProgress(completed, uniquePaths.length);
-
-    let cursor = 0;
-    const worker = async () => {
-      while (cursor < pending.length) {
-        const path = pending[cursor];
-        cursor += 1;
-        const image = await this.#decodeImage(path);
-        this.#cache.set(path, image);
-        completed += 1;
-        onProgress(completed, uniquePaths.length);
-      }
+  get touchHitbox() {
+    return {
+      x: this.x - this.width,
+      y: this.y - this.height * 2,
+      width: this.width * 2,
+      height: this.height * 2,
     };
-
-    const workerCount = Math.min(this.#concurrency, pending.length);
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    return uniquePaths.map((path) => this.#cache.get(path));
   }
 
-  async #decodeImage(path) {
-    const image = new Image();
-    image.decoding = 'async';
-    image.src = path;
+  get state() {
+    if (this.hp <= 0) return 4;
+    const ratio = this.hp / this.maxHp;
+    if (ratio <= 0.4) return 3;
+    if (ratio <= 0.7) return 2;
+    return 1;
+  }
 
-    if (typeof image.decode === 'function') {
-      await image.decode();
-      return image;
-    }
-
-    await new Promise((resolve, reject) => {
-      image.addEventListener('load', resolve, { once: true });
-      image.addEventListener('error', () => reject(new Error(`이미지를 불러오지 못했습니다: ${path}`)), { once: true });
-    });
-    return image;
+  damage(amount) {
+    if (this.destroyed) return false;
+    this.hp = Math.max(0, this.hp - amount);
+    if (this.hp === 0) this.destroyed = true;
+    return this.destroyed;
   }
 }
 
-Object.assign(exports, { AssetLoader });
+class ObjectManager {
+  constructor(definitions) {
+    this.objects = definitions.map((definition) => new DestructibleObject(definition));
+  }
+
+  get destroyedCount() {
+    return this.objects.filter((item) => item.destroyed).length;
+  }
+
+  get allDestroyed() {
+    return this.destroyedCount === this.objects.length;
+  }
+
+  canTouchSmash(player, worldX, worldY) {
+    const range = attackRange(player);
+    return this.objects.some((item) => (
+      !item.destroyed
+      && containsPoint(item.touchHitbox, worldX, worldY)
+      && intersects(range, item.hitbox)
+    ));
+  }
+
+  attack(player, attackType) {
+    const damageBase = COMBAT.smashDamageByLevel[player.level - 1];
+    const isSpecial = attackType === 'biting';
+    const range = attackRange(player);
+    const result = { hit: 0, blocked: [], damaged: [], destroyed: [], range };
+
+    for (const item of this.objects) {
+      if (item.destroyed || !intersects(range, item.hitbox)) continue;
+      if (player.level < item.requiredLevel) {
+        result.blocked.push(item);
+        continue;
+      }
+      result.hit += 1;
+      const wasDestroyed = item.damage(isSpecial ? item.hp : damageBase);
+      result.damaged.push(item);
+      if (wasDestroyed) result.destroyed.push(item);
+    }
+    return result;
+  }
+}
+
+Object.assign(exports, { ObjectManager });
 },
 "js/game/navigation.js": (__require, exports) => {
 const HOUSE_FLOORS = [
@@ -1163,54 +1480,173 @@ class Navigation {
 
 Object.assign(exports, { Navigation });
 },
-"js/core/performance-monitor.js": (__require, exports) => {
-class PerformanceMonitor {
-  #longFrameMs;
-  #sampleStarted = performance.now();
-  #frames = 0;
-  #longFrames = 0;
-  #maxFrameMs = 0;
-  #maxRenderMs = 0;
-  #fps = 0;
+"js/game/player-controller.js": (__require, exports) => {
+const { GAME_FLOW, PLAYER_RENDER, SPRITE_PATHS } = __require("js/config.js");
 
-  constructor({ longFrameMs = 50 } = {}) {
-    this.#longFrameMs = longFrameMs;
+const ACTIONS = {
+  idle: { frames: [SPRITE_PATHS.running[0]], frameSeconds: 0.1, loop: false },
+  running: { frames: SPRITE_PATHS.running, frameSeconds: 0.1, loop: true },
+  jumping: { frames: SPRITE_PATHS.jumping, frameSeconds: 0.14, loop: true },
+  smashing: { frames: SPRITE_PATHS.smashing, frameSeconds: 0.12, loop: false },
+  biting: { frames: SPRITE_PATHS.biting, frameSeconds: 0.15, loop: false },
+  levelup: { frames: SPRITE_PATHS.levelup, frameSeconds: 0.5, loop: false },
+  victory: { frames: SPRITE_PATHS.victory, frameSeconds: GAME_FLOW.victoryFrameSeconds, loop: true },
+};
+
+class PlayerController {
+  constructor({ name, spawn, navigation }) {
+    this.name = name;
+    this.level = 1;
+    this.exp = 0;
+    this.x = spawn.x;
+    this.y = spawn.y;
+    this.width = PLAYER_RENDER.baseSize;
+    this.height = PLAYER_RENDER.baseSize;
+    this.facing = 1;
+    this.floor = 0;
+    this.navigation = navigation;
+    this.route = [];
+    this.routeMode = null;
+    this.action = 'idle';
+    this.frameIndex = 0;
+    this.frameElapsed = 0;
+    this.attackHitPending = false;
+    this.speed = 520;
   }
 
-  reset() {
-    this.#sampleStarted = performance.now();
-    this.#frames = 0;
-    this.#longFrames = 0;
-    this.#maxFrameMs = 0;
-    this.#maxRenderMs = 0;
-    this.#fps = 0;
+  get spritePath() {
+    return ACTIONS[this.action].frames[this.frameIndex];
   }
 
-  record({ frameDelta, renderDuration }) {
-    this.#frames += 1;
-    this.#maxFrameMs = Math.max(this.#maxFrameMs, frameDelta);
-    this.#maxRenderMs = Math.max(this.#maxRenderMs, renderDuration);
-    if (frameDelta >= this.#longFrameMs) this.#longFrames += 1;
+  get renderScale() {
+    return PLAYER_RENDER.scaleByLevel[this.level - 1]
+      ?? PLAYER_RENDER.scaleByLevel[PLAYER_RENDER.scaleByLevel.length - 1];
+  }
 
-    const elapsed = performance.now() - this.#sampleStarted;
-    if (elapsed >= 1000) {
-      this.#fps = Math.round((this.#frames * 1000) / elapsed);
-      this.#frames = 0;
-      this.#sampleStarted = performance.now();
+  get renderWidth() {
+    return this.width * this.renderScale;
+  }
+
+  get renderHeight() {
+    return this.height * this.renderScale;
+  }
+
+  moveHorizontal(direction) {
+    if (this.isAnimationLocked()) return;
+    if (direction === 0) {
+      if (this.routeMode === 'horizontal') {
+        this.route = [];
+        this.routeMode = null;
+      }
+      return;
     }
+    if (this.navigation.isOnStairs(this)) return;
+    this.route = this.navigation.buildHorizontalRoute(this, direction);
+    this.routeMode = 'horizontal';
   }
 
-  snapshot() {
-    return {
-      fps: this.#fps,
-      longFrames: this.#longFrames,
-      maxFrameMs: Math.round(this.#maxFrameMs * 10) / 10,
-      maxRenderMs: Math.round(this.#maxRenderMs * 10) / 10,
-    };
+  moveFloor(direction) {
+    if (this.isAnimationLocked()) return;
+    if (this.routeMode === 'stairs' && this.route.length > 0) return;
+    const route = this.navigation.buildStairStep(this, direction);
+    if (route.length === 0) return;
+    this.route = route;
+    this.routeMode = 'stairs';
+  }
+
+  attack(type) {
+    if (this.isAnimationLocked()) return false;
+    this.route = [];
+    this.routeMode = null;
+    this.#setAction(type);
+    this.attackHitPending = true;
+    return true;
+  }
+
+  isAttacking() {
+    return this.action === 'smashing' || this.action === 'biting';
+  }
+
+  isAnimationLocked() {
+    return this.isAttacking() || this.action === 'levelup' || this.action === 'victory';
+  }
+
+  consumeAttackHit() {
+    if (!this.attackHitPending || this.frameIndex < 1) return null;
+    this.attackHitPending = false;
+    return this.action;
+  }
+
+  setLevel(level) {
+    if (level <= this.level) return;
+    this.level = level;
+    this.route = [];
+    this.routeMode = null;
+    this.#setAction('levelup');
+  }
+
+  setVictory() {
+    this.route = [];
+    this.routeMode = null;
+    this.#setAction('victory');
+  }
+
+  update(delta) {
+    if (!this.isAnimationLocked()) this.#updateMovement(delta);
+    this.#updateAnimation(delta);
+  }
+
+  #updateMovement(delta) {
+    const target = this.route[0];
+    if (!target) {
+      this.routeMode = null;
+      if (this.action !== 'idle') this.#setAction('idle');
+      return;
+    }
+
+    const dx = target.x - this.x;
+    const dy = target.y - this.y;
+    const distance = Math.hypot(dx, dy);
+    const travel = this.speed * delta;
+    if (Math.abs(dx) > 1) this.facing = dx < 0 ? -1 : 1;
+
+    if (distance <= travel || distance < 2) {
+      this.x = target.x;
+      this.y = target.y;
+      if (Number.isInteger(target.floor)) this.floor = target.floor;
+      this.route.shift();
+    } else {
+      this.x += (dx / distance) * travel;
+      this.y += (dy / distance) * travel;
+    }
+
+    const nextAction = target.action ?? 'running';
+    if (this.action !== nextAction) this.#setAction(nextAction);
+  }
+
+  #updateAnimation(delta) {
+    const definition = ACTIONS[this.action];
+    this.frameElapsed += delta;
+    if (this.frameElapsed < definition.frameSeconds) return;
+    this.frameElapsed -= definition.frameSeconds;
+
+    if (this.frameIndex < definition.frames.length - 1) {
+      this.frameIndex += 1;
+      return;
+    }
+
+    if (definition.loop) this.frameIndex = 0;
+    else if (this.action !== 'idle') this.#setAction('idle');
+  }
+
+  #setAction(action) {
+    this.action = action;
+    this.frameIndex = 0;
+    this.frameElapsed = 0;
   }
 }
 
-Object.assign(exports, { PerformanceMonitor });
+Object.assign(exports, { PlayerController });
 },
 "js/game/renderer.js": (__require, exports) => {
 const {
@@ -1412,416 +1848,6 @@ class Renderer {
 }
 
 Object.assign(exports, { Renderer });
-},
-"js/game/object-manager.js": (__require, exports) => {
-const { COMBAT, PLAYER_RENDER } = __require("js/config.js");
-
-function intersects(a, b) {
-  return a.x < b.x + b.width && a.x + a.width > b.x
-    && a.y < b.y + b.height && a.y + a.height > b.y;
-}
-
-function containsPoint(rect, x, y) {
-  return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
-}
-
-function attackRange(player) {
-  const visualWidth = player.renderWidth ?? player.width;
-  const visualHeight = player.renderHeight ?? player.height;
-  const rangeWidth = Math.max(visualWidth * 0.45, COMBAT.minimumAttackReach);
-  const rangeHeight = visualHeight * 0.75;
-  const bodyFront = visualWidth * 0.5;
-  return {
-    x: player.facing > 0 ? player.x + bodyFront : player.x - bodyFront - rangeWidth,
-    y: player.y - rangeHeight,
-    width: rangeWidth,
-    height: rangeHeight,
-  };
-}
-
-class DestructibleObject {
-  constructor(definition) {
-    Object.assign(this, definition);
-    const requiredScale = PLAYER_RENDER.scaleByLevel[this.requiredLevel - 1]
-      ?? PLAYER_RENDER.scaleByLevel[PLAYER_RENDER.scaleByLevel.length - 1];
-    const requiredDogHeight = PLAYER_RENDER.baseSize * requiredScale;
-    const maximumMountHeight = requiredDogHeight * COMBAT.maximumMountHeightRatio;
-    this.floorY = definition.floorY ?? definition.y;
-    this.y = Math.max(definition.y, this.floorY - maximumMountHeight);
-    this.maxHp = COMBAT.objectHpByLevel[this.requiredLevel - 1];
-    this.hp = this.maxHp;
-    this.destroyed = false;
-  }
-
-  get hitbox() {
-    return { x: this.x - this.width / 2, y: this.y - this.height, width: this.width, height: this.height };
-  }
-
-  get touchHitbox() {
-    return {
-      x: this.x - this.width,
-      y: this.y - this.height * 2,
-      width: this.width * 2,
-      height: this.height * 2,
-    };
-  }
-
-  get state() {
-    if (this.hp <= 0) return 4;
-    const ratio = this.hp / this.maxHp;
-    if (ratio <= 0.4) return 3;
-    if (ratio <= 0.7) return 2;
-    return 1;
-  }
-
-  damage(amount) {
-    if (this.destroyed) return false;
-    this.hp = Math.max(0, this.hp - amount);
-    if (this.hp === 0) this.destroyed = true;
-    return this.destroyed;
-  }
-}
-
-class ObjectManager {
-  constructor(definitions) {
-    this.objects = definitions.map((definition) => new DestructibleObject(definition));
-  }
-
-  get destroyedCount() {
-    return this.objects.filter((item) => item.destroyed).length;
-  }
-
-  get allDestroyed() {
-    return this.destroyedCount === this.objects.length;
-  }
-
-  canTouchSmash(player, worldX, worldY) {
-    const range = attackRange(player);
-    return this.objects.some((item) => (
-      !item.destroyed
-      && containsPoint(item.touchHitbox, worldX, worldY)
-      && intersects(range, item.hitbox)
-    ));
-  }
-
-  attack(player, attackType) {
-    const damageBase = COMBAT.smashDamageByLevel[player.level - 1];
-    const isSpecial = attackType === 'biting';
-    const range = attackRange(player);
-    const result = { hit: 0, blocked: [], damaged: [], destroyed: [], range };
-
-    for (const item of this.objects) {
-      if (item.destroyed || !intersects(range, item.hitbox)) continue;
-      if (player.level < item.requiredLevel) {
-        result.blocked.push(item);
-        continue;
-      }
-      result.hit += 1;
-      const wasDestroyed = item.damage(isSpecial ? item.hp : damageBase);
-      result.damaged.push(item);
-      if (wasDestroyed) result.destroyed.push(item);
-    }
-    return result;
-  }
-}
-
-Object.assign(exports, { ObjectManager });
-},
-"js/game/player-controller.js": (__require, exports) => {
-const { PLAYER_RENDER, SPRITE_PATHS } = __require("js/config.js");
-
-const ACTIONS = {
-  idle: { frames: [SPRITE_PATHS.running[0]], frameSeconds: 0.1, loop: false },
-  running: { frames: SPRITE_PATHS.running, frameSeconds: 0.1, loop: true },
-  jumping: { frames: SPRITE_PATHS.jumping, frameSeconds: 0.14, loop: true },
-  smashing: { frames: SPRITE_PATHS.smashing, frameSeconds: 0.12, loop: false },
-  biting: { frames: SPRITE_PATHS.biting, frameSeconds: 0.15, loop: false },
-  levelup: { frames: SPRITE_PATHS.levelup, frameSeconds: 0.5, loop: false },
-};
-
-class PlayerController {
-  constructor({ name, spawn, navigation }) {
-    this.name = name;
-    this.level = 1;
-    this.exp = 0;
-    this.x = spawn.x;
-    this.y = spawn.y;
-    this.width = PLAYER_RENDER.baseSize;
-    this.height = PLAYER_RENDER.baseSize;
-    this.facing = 1;
-    this.floor = 0;
-    this.navigation = navigation;
-    this.route = [];
-    this.routeMode = null;
-    this.action = 'idle';
-    this.frameIndex = 0;
-    this.frameElapsed = 0;
-    this.attackHitPending = false;
-    this.speed = 520;
-  }
-
-  get spritePath() {
-    return ACTIONS[this.action].frames[this.frameIndex];
-  }
-
-  get renderScale() {
-    return PLAYER_RENDER.scaleByLevel[this.level - 1]
-      ?? PLAYER_RENDER.scaleByLevel[PLAYER_RENDER.scaleByLevel.length - 1];
-  }
-
-  get renderWidth() {
-    return this.width * this.renderScale;
-  }
-
-  get renderHeight() {
-    return this.height * this.renderScale;
-  }
-
-  moveHorizontal(direction) {
-    if (this.isAnimationLocked()) return;
-    if (direction === 0) {
-      if (this.routeMode === 'horizontal') {
-        this.route = [];
-        this.routeMode = null;
-      }
-      return;
-    }
-    if (this.navigation.isOnStairs(this)) return;
-    this.route = this.navigation.buildHorizontalRoute(this, direction);
-    this.routeMode = 'horizontal';
-  }
-
-  moveFloor(direction) {
-    if (this.isAnimationLocked()) return;
-    if (this.routeMode === 'stairs' && this.route.length > 0) return;
-    const route = this.navigation.buildStairStep(this, direction);
-    if (route.length === 0) return;
-    this.route = route;
-    this.routeMode = 'stairs';
-  }
-
-  attack(type) {
-    if (this.isAnimationLocked()) return false;
-    this.route = [];
-    this.routeMode = null;
-    this.#setAction(type);
-    this.attackHitPending = true;
-    return true;
-  }
-
-  isAttacking() {
-    return this.action === 'smashing' || this.action === 'biting';
-  }
-
-  isAnimationLocked() {
-    return this.isAttacking() || this.action === 'levelup';
-  }
-
-  consumeAttackHit() {
-    if (!this.attackHitPending || this.frameIndex < 1) return null;
-    this.attackHitPending = false;
-    return this.action;
-  }
-
-  setLevel(level) {
-    if (level <= this.level) return;
-    this.level = level;
-    this.route = [];
-    this.routeMode = null;
-    this.#setAction('levelup');
-  }
-
-  update(delta) {
-    if (!this.isAnimationLocked()) this.#updateMovement(delta);
-    this.#updateAnimation(delta);
-  }
-
-  #updateMovement(delta) {
-    const target = this.route[0];
-    if (!target) {
-      this.routeMode = null;
-      if (this.action !== 'idle') this.#setAction('idle');
-      return;
-    }
-
-    const dx = target.x - this.x;
-    const dy = target.y - this.y;
-    const distance = Math.hypot(dx, dy);
-    const travel = this.speed * delta;
-    if (Math.abs(dx) > 1) this.facing = dx < 0 ? -1 : 1;
-
-    if (distance <= travel || distance < 2) {
-      this.x = target.x;
-      this.y = target.y;
-      if (Number.isInteger(target.floor)) this.floor = target.floor;
-      this.route.shift();
-    } else {
-      this.x += (dx / distance) * travel;
-      this.y += (dy / distance) * travel;
-    }
-
-    const nextAction = target.action ?? 'running';
-    if (this.action !== nextAction) this.#setAction(nextAction);
-  }
-
-  #updateAnimation(delta) {
-    const definition = ACTIONS[this.action];
-    this.frameElapsed += delta;
-    if (this.frameElapsed < definition.frameSeconds) return;
-    this.frameElapsed -= definition.frameSeconds;
-
-    if (this.frameIndex < definition.frames.length - 1) {
-      this.frameIndex += 1;
-      return;
-    }
-
-    if (definition.loop) this.frameIndex = 0;
-    else if (this.action !== 'idle') this.#setAction('idle');
-  }
-
-  #setAction(action) {
-    this.action = action;
-    this.frameIndex = 0;
-    this.frameElapsed = 0;
-  }
-}
-
-Object.assign(exports, { PlayerController });
-},
-"js/audio/sfx-player.js": (__require, exports) => {
-const AudioContextClass = () => globalThis.AudioContext ?? globalThis.webkitAudioContext;
-
-class SfxPlayer {
-  constructor({ volume = 0.42, onCue = () => {} } = {}) {
-    this.volume = volume;
-    this.onCue = onCue;
-    this.context = null;
-    this.master = null;
-    this.noiseBuffer = null;
-    this.disposed = false;
-  }
-
-  unlock() {
-    const context = this.#ensureContext();
-    if (context?.state === 'suspended') context.resume().catch(() => {});
-  }
-
-  playAttack(type) {
-    if (type === 'biting') {
-      this.#cue('bite');
-      this.#noise(0.15, 0.18, 520);
-      this.#tone(145, 72, 0.18, 0.22, 'sawtooth');
-      return;
-    }
-    this.#cue('smash');
-    this.#noise(0.09, 0.11, 900);
-    this.#tone(240, 125, 0.1, 0.14, 'triangle');
-  }
-
-  playHit(strong = false) {
-    this.#cue(strong ? 'heavy-hit' : 'hit');
-    this.#noise(strong ? 0.18 : 0.11, strong ? 0.34 : 0.22, strong ? 1050 : 1450);
-    this.#tone(strong ? 105 : 155, strong ? 52 : 78, strong ? 0.2 : 0.13, strong ? 0.3 : 0.22, 'square');
-  }
-
-  playBlocked() {
-    this.#cue('blocked');
-    this.#tone(165, 128, 0.13, 0.12, 'square');
-  }
-
-  playDestroy() {
-    this.#cue('destroy');
-    this.#noise(0.3, 0.42, 700);
-    this.#tone(128, 45, 0.34, 0.32, 'sawtooth');
-    this.#tone(82, 38, 0.26, 0.22, 'square', 0.06);
-  }
-
-  playLevelUp() {
-    this.#cue('level-up');
-    [523.25, 659.25, 783.99, 1046.5].forEach((frequency, index) => {
-      this.#tone(frequency, frequency * 1.015, 0.34, 0.15, 'sine', index * 0.115);
-    });
-    [1318.5, 1568, 2093].forEach((frequency, index) => {
-      this.#tone(frequency, frequency * 0.99, 0.25, 0.055, 'sine', 0.38 + index * 0.075);
-    });
-  }
-
-  suspend() {
-    if (this.context?.state === 'running') this.context.suspend().catch(() => {});
-  }
-
-  resume() {
-    if (this.context?.state === 'suspended') this.context.resume().catch(() => {});
-  }
-
-  dispose() {
-    if (this.disposed) return;
-    this.disposed = true;
-    const context = this.context;
-    if (!context || context.state === 'closed') return;
-    // 파괴·레벨업의 잔향이 결과 화면에서도 끝까지 들리도록 잠시 뒤 닫는다.
-    globalThis.setTimeout(() => context.close().catch(() => {}), 1600);
-  }
-
-  #cue(name) {
-    this.onCue(name);
-    this.unlock();
-  }
-
-  #ensureContext() {
-    if (this.disposed) return null;
-    if (this.context) return this.context;
-    const Context = AudioContextClass();
-    if (!Context) return null;
-    this.context = new Context({ latencyHint: 'interactive' });
-    this.master = this.context.createGain();
-    this.master.gain.value = this.volume;
-    this.master.connect(this.context.destination);
-    return this.context;
-  }
-
-  #tone(startFrequency, endFrequency, duration, gain, type, delay = 0) {
-    const context = this.#ensureContext();
-    if (!context) return;
-    const start = context.currentTime + delay;
-    const oscillator = context.createOscillator();
-    const envelope = context.createGain();
-    oscillator.type = type;
-    oscillator.frequency.setValueAtTime(startFrequency, start);
-    oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, endFrequency), start + duration);
-    envelope.gain.setValueAtTime(0.0001, start);
-    envelope.gain.exponentialRampToValueAtTime(gain, start + Math.min(0.018, duration * 0.2));
-    envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-    oscillator.connect(envelope).connect(this.master);
-    oscillator.start(start);
-    oscillator.stop(start + duration + 0.02);
-  }
-
-  #noise(duration, gain, cutoff, delay = 0) {
-    const context = this.#ensureContext();
-    if (!context) return;
-    if (!this.noiseBuffer) {
-      const length = Math.ceil(context.sampleRate * 0.5);
-      this.noiseBuffer = context.createBuffer(1, length, context.sampleRate);
-      const data = this.noiseBuffer.getChannelData(0);
-      for (let index = 0; index < length; index += 1) data[index] = Math.random() * 2 - 1;
-    }
-    const start = context.currentTime + delay;
-    const source = context.createBufferSource();
-    const filter = context.createBiquadFilter();
-    const envelope = context.createGain();
-    source.buffer = this.noiseBuffer;
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(cutoff, start);
-    envelope.gain.setValueAtTime(gain, start);
-    envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-    source.connect(filter).connect(envelope).connect(this.master);
-    source.start(start);
-    source.stop(start + duration + 0.02);
-  }
-}
-
-Object.assign(exports, { SfxPlayer });
 }
   };
   const __cache = Object.create(null);

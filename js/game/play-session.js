@@ -1,4 +1,4 @@
-import { AUDIO_PATHS, COMBAT, PERFORMANCE, SPRITE_PATHS } from '../config.js';
+import { AUDIO_PATHS, COMBAT, GAME_FLOW, PERFORMANCE, SPRITE_PATHS } from '../config.js';
 import { BgmPlayer } from '../audio/bgm-player.js';
 import { SfxPlayer } from '../audio/sfx-player.js';
 import { GameLoop } from '../core/game-loop.js';
@@ -31,7 +31,7 @@ export class PlaySession {
     this.remainingSeconds = location.durationSeconds;
     this.biteCooldown = 0;
     this.specialExplosions = [];
-    this.pendingSpecialClear = false;
+    this.victoryRemaining = null;
     this.destroyedExp = 0;
     this.finished = false;
     this.toastTimeout = 0;
@@ -52,10 +52,15 @@ export class PlaySession {
     this.input = new InputHandler({
       canvas,
       toWorld: (x, y) => this.renderer.screenToWorld(x, y, this.camera),
-      onHorizontal: (direction) => this.player.moveHorizontal(direction),
-      onFloor: (direction) => this.player.moveFloor(direction),
+      onHorizontal: (direction) => {
+        if (this.victoryRemaining === null) this.player.moveHorizontal(direction);
+      },
+      onFloor: (direction) => {
+        if (this.victoryRemaining === null) this.player.moveFloor(direction);
+      },
       onObjectTouch: (x, y) => {
-        if (this.objects.canTouchSmash(this.player, x, y)) this.smash();
+        if (this.victoryRemaining === null
+          && this.objects.canTouchSmash(this.player, x, y)) this.smash();
       },
       onSmash: () => this.smash(),
       onBite: () => this.bite(),
@@ -121,18 +126,22 @@ export class PlaySession {
 
   update(delta) {
     this.player.update(delta);
-    this.remainingSeconds = Math.max(0, this.remainingSeconds - delta);
-    this.biteCooldown = Math.max(0, this.biteCooldown - delta);
+    if (this.victoryRemaining === null) {
+      this.remainingSeconds = Math.max(0, this.remainingSeconds - delta);
+      this.biteCooldown = Math.max(0, this.biteCooldown - delta);
+    } else {
+      this.victoryRemaining = Math.max(0, this.victoryRemaining - delta);
+    }
     this.updateSpecialExplosions(delta);
 
     const attackType = this.player.consumeAttackHit();
     if (attackType) this.resolveAttack(attackType);
 
-    if (this.pendingSpecialClear && this.specialExplosions.length === 0) {
+    if (this.victoryRemaining === 0 && this.specialExplosions.length === 0) {
       this.finish(true, 'clear');
       return;
     }
-    if (this.remainingSeconds <= 0 && !this.finished && !this.pendingSpecialClear) {
+    if (this.remainingSeconds <= 0 && !this.finished && this.victoryRemaining === null) {
       this.finish(false, 'timeout');
       return;
     }
@@ -166,10 +175,12 @@ export class PlaySession {
   }
 
   smash() {
+    if (this.victoryRemaining !== null || this.finished) return;
     if (this.player.attack('smashing')) this.sfx.playAttack('smashing');
   }
 
   bite() {
+    if (this.victoryRemaining !== null || this.finished) return;
     if (this.biteCooldown > 0) {
       this.showToast(`필살기 준비 중 · ${Math.ceil(this.biteCooldown)}초`);
       return;
@@ -218,8 +229,10 @@ export class PlaySession {
       this.showToast(`레벨 업! Lv.${nextLevel}`);
     }
     if (this.objects.allDestroyed) {
-      if (attackType === 'biting' && this.specialExplosions.length > 0) this.pendingSpecialClear = true;
-      else this.finish(true, 'clear');
+      const cycleSeconds = GAME_FLOW.victoryFrameSeconds * SPRITE_PATHS.victory.length;
+      this.victoryRemaining = cycleSeconds * GAME_FLOW.victoryRepeatCount;
+      this.player.setVictory();
+      this.renderer.canvas.dataset.victoryRepeatCount = String(GAME_FLOW.victoryRepeatCount);
     }
   }
 

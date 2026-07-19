@@ -4,7 +4,7 @@ export const LOCATIONS = Object.freeze({
   yard: {
     id: 'yard',
     label: '마당',
-    durationSeconds: 480,
+    durationSeconds: 240,
     cameraBounds: { x: 0, y: 0, width: 3840, height: 2160 },
     spawn: { x: 100, y: 2050 },
     tilePaths: [tilePath(1, 1), tilePath(1, 2), tilePath(2, 1), tilePath(2, 2)],
@@ -13,7 +13,7 @@ export const LOCATIONS = Object.freeze({
   house: {
     id: 'house',
     label: '집',
-    durationSeconds: 600,
+    durationSeconds: 300,
     cameraBounds: { x: 1920, y: 0, width: 3840, height: 2160 },
     spawn: { x: 4300, y: 1780 },
     tilePaths: [tilePath(1, 2), tilePath(1, 3), tilePath(2, 2), tilePath(2, 3)],

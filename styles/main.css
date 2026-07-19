@@ -50,7 +50,14 @@ button { cursor: pointer; }
   filter: drop-shadow(0 14px 18px rgb(33 58 77 / 24%));
 }
 
-#title-screen { align-content: center; gap: 24px; }
+#title-screen {
+  align-content: center;
+  gap: 24px;
+  background-image: url("../image_sources/house_garden_updated.jpg");
+  background-position: center center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
 
 .panel {
   width: min(92vw, 820px);
