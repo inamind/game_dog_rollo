@@ -156,7 +156,7 @@ export class PlaySession {
   render() {
     this.renderer.beginFrame(this.camera);
     this.renderer.drawBackground(this.camera, this.location, this.assets);
-    this.renderer.drawObjects(this.objects, this.assets);
+    this.renderer.drawObjects(this.objects, this.assets, this.camera);
     const image = this.assets.get(this.player.spritePath ?? SPRITE_PATHS.running[0]);
     if (image) this.renderer.drawPlayer(this.player, image);
     for (const effect of this.specialExplosions) {

@@ -136,6 +136,9 @@ progress { width: 100%; height: 24px; accent-color: var(--green); }
   bottom: max(24px, env(safe-area-inset-bottom));
   opacity: .58;
   transition: opacity .15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 .virtual-pad:hover, .virtual-pad:focus-within,
 .virtual-attacks:hover, .virtual-attacks:focus-within { opacity: .92; }
@@ -160,6 +163,21 @@ progress { width: 100%; height: 24px; accent-color: var(--green); }
   font-weight: 900;
   box-shadow: 0 4px 0 rgb(0 0 0 / 16%);
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.direction-icon {
+  display: block;
+  width: 34px;
+  height: 34px;
+  margin: auto;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
 }
 .virtual-button:active, .attack-button:active { transform: translateY(3px); box-shadow: 0 1px 0 rgb(0 0 0 / 18%); }
 .move-up { grid-area: up; }

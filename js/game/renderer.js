@@ -12,7 +12,9 @@ const VIRTUAL_HEIGHT = 1080;
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
-    this.context = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    // 태블릿에서는 desynchronized Canvas가 한 프레임의 일부를 먼저 표시해
+    // 투명 PNG 물건이 번쩍일 수 있으므로 브라우저의 기본 합성 버퍼를 사용한다.
+    this.context = canvas.getContext('2d', { alpha: false });
     this.cssWidth = 0;
     this.cssHeight = 0;
     this.dpr = 1;
@@ -107,20 +109,25 @@ export class Renderer {
     );
   }
 
-  drawObjects(objectManager, assets) {
+  drawObjects(objectManager, assets, camera) {
     const ctx = this.context;
     for (const item of objectManager.objects) {
       const box = item.hitbox;
       const spritePath = OBJECT_SPRITE_PATHS[item.id]?.[item.state - 1];
       const sprite = spritePath ? assets.get(spritePath) : null;
+      const drawWidth = sprite ? item.width * 2 : box.width;
+      const drawHeight = sprite ? drawWidth * (sprite.height / sprite.width) : box.height;
+      const drawX = sprite ? item.x - drawWidth / 2 : box.x;
+      const drawY = sprite ? item.y - drawHeight : box.y;
+      if (!this.#isVisible(drawX - 12, drawY - 64, drawWidth + 24, drawHeight + 76, camera)) {
+        continue;
+      }
       ctx.save();
       if (sprite) {
-        const drawWidth = item.width * 2;
-        const drawHeight = drawWidth * (sprite.height / sprite.width);
         ctx.drawImage(
           sprite,
-          Math.round(item.x - drawWidth / 2),
-          Math.round(item.y - drawHeight),
+          Math.round(drawX),
+          Math.round(drawY),
           Math.round(drawWidth),
           Math.round(drawHeight),
         );

@@ -26,7 +26,16 @@ function assert(condition, message) {
   if (!condition) failures.push(message);
 }
 
-for (const file of ['index.html', 'styles/main.css', 'js/main.js', 'dist/rollo.bundle.js']) {
+for (const file of [
+  'index.html',
+  'styles/main.css',
+  'js/main.js',
+  'dist/rollo.bundle.js',
+  'image_sources/ui_direction_up.png',
+  'image_sources/ui_direction_left.png',
+  'image_sources/ui_direction_down.png',
+  'image_sources/ui_direction_right.png',
+]) {
   try { await access(join(root, file)); } catch { failures.push(`필수 파일 누락: ${file}`); }
 }
 
@@ -243,6 +252,7 @@ const jsFiles = (await readdir(join(root, 'js'), { recursive: true }))
 for (const file of jsFiles) {
   const source = await readFile(join(root, 'js', file), 'utf8');
   assert(!source.includes('house_garden_background.png'), `런타임 전체 배경 참조 금지: ${file}`);
+  assert(!source.includes('desynchronized: true'), `태블릿 Canvas 부분 프레임 표시 금지: ${file}`);
 }
 
 if (failures.length) {
