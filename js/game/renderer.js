@@ -1,5 +1,6 @@
 import {
   LEVEL_COLORS,
+  OBJECT_SPRITE_BOTTOM_INSETS,
   OBJECT_SPRITE_PATHS,
   PERFORMANCE,
   PLAYER_RENDER,
@@ -118,7 +119,11 @@ export class Renderer {
       const drawWidth = sprite ? item.width * 2 : box.width;
       const drawHeight = sprite ? drawWidth * (sprite.height / sprite.width) : box.height;
       const drawX = sprite ? item.x - drawWidth / 2 : box.x;
-      const drawY = sprite ? item.y - drawHeight : box.y;
+      const bottomInset = sprite
+        ? (OBJECT_SPRITE_BOTTOM_INSETS[item.id]?.[item.state - 1] ?? 0)
+        : 0;
+      const scaledBottomInset = sprite ? drawHeight * bottomInset / sprite.height : 0;
+      const drawY = sprite ? item.y - drawHeight + scaledBottomInset : box.y;
       if (!this.#isVisible(drawX - 12, drawY - 64, drawWidth + 24, drawHeight + 76, camera)) {
         continue;
       }

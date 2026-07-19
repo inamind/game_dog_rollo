@@ -87,6 +87,46 @@ export const OBJECT_SPRITE_PATHS = Object.freeze({
   tree: [1, 2, 3, 4].map((state) => `./image_sources/object_tree_state_${state}.png`),
 });
 
+// Each sprite is 384 px tall. These are the transparent rows below its visible
+// pixels, used to align the visible bottom precisely with the floor baseline.
+export const OBJECT_SPRITE_BOTTOM_INSETS = Object.freeze({
+  bed: [21, 36, 41, 53],
+  bench: [21, 21, 31, 44],
+  bike: [19, 24, 26, 38],
+  box: [35, 20, 26, 56],
+  chair: [24, 23, 18, 30],
+  desk: [37, 28, 21, 37],
+  fence: [53, 39, 35, 21],
+  fountain: [28, 18, 37, 59],
+  frame: [39, 39, 19, 32],
+  fridge: [28, 28, 18, 49],
+  lamp: [25, 25, 18, 25],
+  microwave: [28, 27, 21, 24],
+  mirror: [37, 37, 18, 32],
+  'old-furniture': [21, 21, 41, 41],
+  piano: [29, 23, 20, 44],
+  plate: [44, 44, 19, 22],
+  'pot-a': [49, 39, 12, 60],
+  'pot-b': [36, 19, 19, 18],
+  'pot-c': [31, 30, 39, 34],
+  sandcastle: [18, 19, 19, 35],
+  seesaw: [46, 45, 21, 30],
+  shelf: [20, 22, 20, 35],
+  sink: [17, 22, 28, 35],
+  slide: [32, 19, 47, 55],
+  sofa: [29, 28, 21, 40],
+  swing: [20, 20, 56, 25],
+  table: [23, 23, 20, 41],
+  tile: [31, 27, 20, 20],
+  toilet: [20, 19, 33, 58],
+  toolbox: [41, 25, 21, 33],
+  trampoline: [28, 28, 21, 38],
+  tree: [30, 28, 26, 35],
+  tv: [25, 24, 21, 51],
+  vase: [19, 19, 19, 67],
+  wardrobe: [24, 19, 25, 33],
+});
+
 export function tilePath(row, column) {
   return `./image_sources/house_garden_tile_r${row}_c${column}.png`;
 }

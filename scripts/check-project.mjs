@@ -10,6 +10,7 @@ import { LOCATIONS } from '../js/data/locations.js';
 import {
   AUDIO_PATHS,
   LEVEL_COLORS,
+  OBJECT_SPRITE_BOTTOM_INSETS,
   OBJECT_SPRITE_PATHS,
   PLAYER_RENDER,
   SPRITE_PATHS,
@@ -57,6 +58,11 @@ assert(OBJECTS.yard.length === 15, `마당 물건 수 오류: ${OBJECTS.yard.len
 assert(OBJECTS.house.reduce((sum, item) => sum + item.exp, 0) === 165, '집 EXP 합계 오류');
 assert(OBJECTS.yard.reduce((sum, item) => sum + item.exp, 0) === 129, '마당 EXP 합계 오류');
 const ids = Object.values(OBJECTS).flat().map((item) => item.id);
+assert(ids.every((id) => OBJECT_SPRITE_BOTTOM_INSETS[id]?.length === 4),
+  '물건 스프라이트 바닥 보정값 누락');
+assert(Object.values(OBJECT_SPRITE_BOTTOM_INSETS).flat()
+  .every((value) => value >= 0 && value < 384),
+  '물건 스프라이트 바닥 보정값 범위 오류');
 assert(new Set(ids).size === ids.length, '물건 ID 중복');
 assert(PLAYER_RENDER.groundOffsetY === 30, '강아지 발밑 렌더링 보정값 오류');
 assert(PLAYER_RENDER.scaleByLevel.join(',') === '0.6,0.725,0.85,0.975,1.1',
